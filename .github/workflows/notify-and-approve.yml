@@ -113,15 +113,6 @@ jobs:
           echo "secret_alerts=$SECRET_ALERTS" >> "$GITHUB_OUTPUT"
           echo "Letti: code=$CODE_ALERTS secret=$SECRET_ALERTS"
 
-      - name: Notify Teams
-        uses: ./.github/actions/notify-teams
-        with:
-          webhook-url: ${{ secrets.MS_TEAMS_WEBHOOK_URI }}
-          repository: ${{ github.repository }}
-          run-id: ${{ github.run_id }}
-          server-url: ${{ github.server_url }}
-          code-alerts: ${{ steps.ghas.outputs.code_alerts }}
-          secret-alerts: ${{ steps.ghas.outputs.secret_alerts }}
 
       - name: Setup business-approval environment and reviewer team
         env:
