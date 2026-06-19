@@ -2,11 +2,14 @@ name: Business Check + Security Gate
 
 # Scatta SOLO quando arriva vero codice applicativo, non quando il
 # template scrive solo i suoi file di scaffolding (.github, .bolton, README).
-# Se un push tocca ESCLUSIVAMENTE questi percorsi, il workflow non parte.
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '.github/**'
+      - '.bolton/**'
+      - 'README*.md'
 
 permissions:
   contents: write
@@ -14,31 +17,38 @@ permissions:
   actions: read
 
 jobs:
+  # ===========================================================================
+  # 0) GUARDIA - Controlla se c'è codice vero o solo scaffolding
+  # ===========================================================================
   guard:
-    name: Check
+    name: Check if real code exists
     runs-on: ubuntu-latest
     outputs:
       proceed: ${{ steps.check.outputs.proceed }}
-      
     steps:
-    - uses: actions/checkout@v4
-    - id: check
-      run: |
-        FILES=$(find . -type f \
-        -not -path "./.github/*" \
-        if [ -n "$FILES" ]; then
-        echo "proceed=true" >> "$GITHUB_OUTPUT"
-        else
-        echo "proceed=false" >> "$GITHUB_OUTPUT"
-        fi
-    
+      - uses: actions/checkout@v4
+      
+      - id: check
+        name: Verifica presenza file applicativi
+        run: |
+          # Cerca tutti i file, escludendo le cartelle di Git, Github, Bolton e i README
+          FILES=$(find . -type f -not -path "*/\.git/*" -not -path "*/\.github/*" -not -path "*/\.bolton/*" -not -name "README*.md")
+          
+          if [ -n "$FILES" ]; then
+            echo "Trovato codice applicativo vero. Procediamo."
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Trovati solo file di template o repo vuota. Mi fermo."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # ===========================================================================
   # 1) ANALISI DI SICUREZZA - CodeQL come step esplicito (controllo del timing)
   # ===========================================================================
   code-scanning:
+    name: CodeQL Analysis (Python)
     needs: guard
     if: needs.guard.outputs.proceed == 'true'
-    name: CodeQL Analysis (Python)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,9 +103,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Prova a leggere gli alert via API. Se CodeQL non ha ancora
-          # finito di indicizzare o i permessi non bastano, l'output resta
-          # vuoto e lo segnaliamo in chiaro invece di mostrare un falso zero.
           CODE_ALERTS=$(gh api \
             "repos/${{ github.repository }}/code-scanning/alerts?state=open" \
             --jq 'length' 2>/dev/null || echo "")
@@ -161,8 +168,6 @@ jobs:
 
   # ===========================================================================
   # 5) BUILD FITTIZIA + TAGGING passed/not-passed
-  #    Parte sempre se non e' la prima volta (marker gia' presente),
-  #    oppure dopo l'approvazione appena avvenuta.
   # ===========================================================================
   build-and-tag:
     name: Build (placeholder) + tag result
