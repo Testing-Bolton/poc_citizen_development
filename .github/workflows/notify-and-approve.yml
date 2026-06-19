@@ -7,10 +7,6 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - '.github/**'
-      - '.bolton/**'
-      - 'README*.md'
 
 permissions:
   contents: write
@@ -18,10 +14,30 @@ permissions:
   actions: read
 
 jobs:
+  guard:
+    name: Check
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      
+    steps:
+    - uses: actions/checkout@v4
+    - id: check
+      run: |
+        FILES=$(find . -type f \
+        -not -path "./.github/*" \
+        if [ -n "$FILES" ]; then
+        echo "proceed=true" >> "$GITHUB_OUTPUT"
+        else
+        echo "proceed=false" >> "$GITHUB_OUTPUT"
+        fi
+    
   # ===========================================================================
   # 1) ANALISI DI SICUREZZA - CodeQL come step esplicito (controllo del timing)
   # ===========================================================================
   code-scanning:
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
     name: CodeQL Analysis (Python)
     runs-on: ubuntu-latest
     steps:
