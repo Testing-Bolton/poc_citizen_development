@@ -1,0 +1,195 @@
+name: Business Check + Security Gate
+
+# Scatta SOLO quando arriva vero codice applicativo, non quando il
+# template scrive solo i suoi file di scaffolding (.github, .bolton, README).
+# Se un push tocca ESCLUSIVAMENTE questi percorsi, il workflow non parte.
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/**'
+      - '.bolton/**'
+      - 'README*.md'
+
+permissions:
+  contents: write
+  security-events: write
+  actions: read
+
+jobs:
+  # ===========================================================================
+  # 1) ANALISI DI SICUREZZA - CodeQL come step esplicito (controllo del timing)
+  # ===========================================================================
+  code-scanning:
+    name: CodeQL Analysis (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-and-quality
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
+
+  # ===========================================================================
+  # 2) RILEVAMENTO PRIMA VOLTA (marker in .github/.approved)
+  # ===========================================================================
+  check-first-run:
+    name: Check if this is first run
+    runs-on: ubuntu-latest
+    needs: code-scanning
+    outputs:
+      is_first_run: ${{ steps.check.outputs.first_run }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if this is first run
+        id: check
+        run: |
+          if [ -f ".github/.approved" ]; then
+            echo "Marker presente: app gia' approvata."
+            echo "first_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Marker assente: prima volta."
+            echo "first_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ===========================================================================
+  # 3) RACCOLTA ESITO GHAS + NOTIFICA TEAMS (solo se prima volta)
+  # ===========================================================================
+  notify-business:
+    name: Notify business team
+    runs-on: ubuntu-latest
+    needs: check-first-run
+    if: needs.check-first-run.outputs.is_first_run == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect GHAS alert counts
+        id: ghas
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Prova a leggere gli alert via API. Se CodeQL non ha ancora
+          # finito di indicizzare o i permessi non bastano, l'output resta
+          # vuoto e lo segnaliamo in chiaro invece di mostrare un falso zero.
+          CODE_ALERTS=$(gh api \
+            "repos/${{ github.repository }}/code-scanning/alerts?state=open" \
+            --jq 'length' 2>/dev/null || echo "")
+          SECRET_ALERTS=$(gh api \
+            "repos/${{ github.repository }}/secret-scanning/alerts?state=open" \
+            --jq 'length' 2>/dev/null || echo "")
+          echo "code_alerts=$CODE_ALERTS" >> "$GITHUB_OUTPUT"
+          echo "secret_alerts=$SECRET_ALERTS" >> "$GITHUB_OUTPUT"
+          echo "Letti: code=$CODE_ALERTS secret=$SECRET_ALERTS"
+
+      - name: Notify Teams
+        uses: ./.github/actions/notify-teams
+        with:
+          webhook-url: ${{ secrets.MS_TEAMS_WEBHOOK_URI }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          server-url: ${{ github.server_url }}
+          code-alerts: ${{ steps.ghas.outputs.code_alerts }}
+          secret-alerts: ${{ steps.ghas.outputs.secret_alerts }}
+
+      - name: Setup business-approval environment and reviewer team
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+        run: |
+          curl -L --fail \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/orgs/${{ github.repository_owner }}/teams/repo-approvers/repos/${{ github.repository }}" \
+            -d '{"permission":"push"}'
+
+          curl -L --fail \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/environments/business-approval" \
+            -d '{"reviewers": [{"type":"Team","id":18113363}]}'
+
+  # ===========================================================================
+  # 4) GATE DI APPROVAZIONE - si ferma finche' il reviewer team non approva
+  # ===========================================================================
+  business-approval:
+    name: Wait for business approval
+    runs-on: ubuntu-latest
+    needs: [check-first-run, notify-business]
+    if: needs.check-first-run.outputs.is_first_run == 'true'
+    environment: business-approval
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write approval marker
+        run: |
+          echo "Repository approved by Business Team on $(date)" > .github/.approved
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/.approved
+          git commit -m "repository marked as approved [skip ci]"
+          git push
+
+  # ===========================================================================
+  # 5) BUILD FITTIZIA + TAGGING passed/not-passed
+  #    Parte sempre se non e' la prima volta (marker gia' presente),
+  #    oppure dopo l'approvazione appena avvenuta.
+  # ===========================================================================
+  build-and-tag:
+    name: Build (placeholder) + tag result
+    runs-on: ubuntu-latest
+    needs: [check-first-run, business-approval, code-scanning]
+    if: always() && needs.code-scanning.result == 'success' && (needs.check-first-run.outputs.is_first_run == 'false' || needs.business-approval.result == 'success')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build placeholder
+        run: |
+          echo "===================================="
+          echo " Building application..."
+          echo " (placeholder - nessuna build reale)"
+          echo "===================================="
+
+      - name: Determine pass/fail tag
+        id: tagdecision
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CODE_ALERTS=$(gh api \
+            "repos/${{ github.repository }}/code-scanning/alerts?state=open" \
+            --jq 'length' 2>/dev/null || echo "")
+          SECRET_ALERTS=$(gh api \
+            "repos/${{ github.repository }}/secret-scanning/alerts?state=open" \
+            --jq 'length' 2>/dev/null || echo "")
+
+          if [ "${CODE_ALERTS:-0}" = "0" ] && [ "${SECRET_ALERTS:-0}" = "0" ]; then
+            echo "result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=not-passed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create result tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="run-${{ github.run_number }}-${{ steps.tagdecision.outputs.result }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "::notice::Tag creato: ${TAG}"

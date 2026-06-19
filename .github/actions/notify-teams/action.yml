@@ -1,0 +1,68 @@
+name: "Notify Teams"
+description: "Invia la notifica di business check al canale Teams, con esito GHAS e link"
+
+inputs:
+  webhook-url:
+    description: "URL dell'Incoming Webhook del canale Teams"
+    required: true
+  repository:
+    description: "owner/repo"
+    required: true
+  run-id:
+    description: "ID della run corrente (per il link di approvazione)"
+    required: true
+  server-url:
+    description: "github.server_url"
+    required: true
+  code-alerts:
+    description: "Numero di alert code scanning aperti (stringa vuota se non disponibile)"
+    required: false
+    default: ""
+  secret-alerts:
+    description: "Numero di alert secret scanning aperti (stringa vuota se non disponibile)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Send notification to Teams
+      shell: bash
+      env:
+        WEBHOOK: ${{ inputs.webhook-url }}
+        REPO: ${{ inputs.repository }}
+        RUN_ID: ${{ inputs.run-id }}
+        SERVER: ${{ inputs.server-url }}
+        CODE_ALERTS: ${{ inputs.code-alerts }}
+        SECRET_ALERTS: ${{ inputs.secret-alerts }}
+      run: |
+        REPO_URL="${SERVER}/${REPO}"
+        APPROVAL_URL="${REPO_URL}/actions/runs/${RUN_ID}"
+        SECURITY_URL="${REPO_URL}/security"
+
+        # Se l'API non ha restituito un valore leggibile, lo segnaliamo
+        # invece di mostrare un falso "0 problemi"
+        if [ -z "$CODE_ALERTS" ] && [ -z "$SECRET_ALERTS" ]; then
+          SEC_LINE="Esito non ancora disponibile: vedi il report completo"
+        else
+          SEC_LINE="Code scanning: ${CODE_ALERTS:-n/d} alert aperti · Secret scanning: ${SECRET_ALERTS:-n/d} alert aperti"
+        fi
+
+        SUMMARY="New repository **${REPO}** requires business approval.<br><br>${SEC_LINE}<br><br>[Approve here](${APPROVAL_URL})<br>[View security report](${SECURITY_URL})"
+
+        echo "Invio notifica a Teams..."
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+          -X POST "${WEBHOOK}" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"@type\": \"MessageCard\",
+            \"@context\": \"http://schema.org/extensions\",
+            \"themeColor\": \"ffc107\",
+            \"summary\": \"Business approval required\",
+            \"text\": \"${SUMMARY}\"
+          }")
+
+        echo "Risposta Teams: HTTP ${HTTP_CODE}"
+        if [ "${HTTP_CODE}" -ge 400 ]; then
+          echo "::warning::Notifica Teams non riuscita (HTTP ${HTTP_CODE}), il flusso continua comunque."
+        fi
